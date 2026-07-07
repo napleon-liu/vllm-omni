@@ -1,6 +1,5 @@
 #!/bin/bash
-# Serve the JoyVL interaction model as a plain VLM (NOT --omni: it is a
-# standard Qwen3-VL autoregressive model, not an omni/diffusion model).
+# Serve the JoyVL interaction model through vLLM-Omni's Qwen3-VL pipeline.
 set -euo pipefail
 
 MODEL="${MODEL:-jdopensource/JoyAI-VL-Interaction-Preview}"
@@ -13,6 +12,7 @@ MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
 IMAGE_LIMIT="${IMAGE_LIMIT:-256}"
 
 CUDA_VISIBLE_DEVICES="${GPU}" vllm serve "${MODEL}" \
+    --omni \
     --served-model-name "${SERVED_NAME}" \
     --port "${PORT}" \
     --max-model-len "${MAX_MODEL_LEN}" \

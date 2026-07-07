@@ -24,6 +24,8 @@ MODEL="${MODEL:-jdopensource/JoyAI-VL-Interaction-Preview}"
 SERVED_NAME="${SERVED_NAME:-JoyAI-VL-Interaction-Preview}"
 GPU="${GPU:-0}"
 MODEL_PORT="${MODEL_PORT:-8061}"
+MAX_MODEL_LEN="${MAX_MODEL_LEN:-131072}"
+IMAGE_LIMIT="${IMAGE_LIMIT:-256}"
 ORCH_PORT="${ORCH_PORT:-8070}"
 WEBUI_PORT="${WEBUI_PORT:-8999}"
 WEBUI_USERNAME="${WEBUI_USERNAME:-admin}"
@@ -65,9 +67,9 @@ spawn() { local log="$1"; shift; setsid "$@" > "$log" 2>&1 < /dev/null & }
 
 echo "[1/3] model on GPU ${GPU}…"
 spawn "$LOG/model.log" env HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1 CUDA_VISIBLE_DEVICES="$GPU" \
-  vllm serve "$MODEL" --served-model-name "$SERVED_NAME" --port "$MODEL_PORT" \
-  --gpu-memory-utilization 0.85 --max-model-len 131072 --enable-prefix-caching \
-  --limit-mm-per-prompt '{"image":256,"video":1}'
+  vllm serve "$MODEL" --omni --served-model-name "$SERVED_NAME" --port "$MODEL_PORT" \
+  --gpu-memory-utilization 0.85 --max-model-len "$MAX_MODEL_LEN" --enable-prefix-caching \
+  --limit-mm-per-prompt "{\"image\":${IMAGE_LIMIT},\"video\":1}"
 wait_http "http://127.0.0.1:${MODEL_PORT}/health" && echo "  up :${MODEL_PORT}"
 
 echo "[2/3] orchestrator (memory=${ENABLE_MEMORY})…"
