@@ -426,37 +426,10 @@ class Qwen3OmniMoeForConditionalGeneration(
         elif self.model_stage == "code2wav":
             seq_token_counts: list[int] | None = kwargs.get("seq_token_counts")
 
-            # Extract codec codes from input
-            if input_ids.shape[0] % 16 == 0:
-                if seq_token_counts is not None:
-                    max_seq_len = max(seq_token_counts) // 16
-                    batch_size = len(seq_token_counts)
-                    split_codes = torch.split(input_ids, seq_token_counts, dim=0)
-                    codes = torch.zeros((batch_size, 16, max_seq_len), device=input_ids.device, dtype=input_ids.dtype)
-                    for idx, code in enumerate(split_codes):
-                        seq_len = code.shape[0] // 16
-                        codes[idx, :, :seq_len] = code.reshape(16, seq_len)
-                else:
-                    codes = input_ids.reshape(1, 16, -1)
-            else:
-                if seq_token_counts is None:
-                    logger.debug(
-                        "Code2Wav warmup input length %s is not divisible by 16; padding with zeros.",
-                        input_ids.shape[0],
-                    )
-                else:
-                    logger.warning_once(
-                        "Code2Wav input length is not divisible by 16; padding with zeros. "
-                        "This is expected only during cudagraph warmup."
-                    )
-                input_ids_flatten = input_ids.reshape(-1)
-                input_ids_flatten = torch.cat(
-                    [
-                        input_ids_flatten,
-                        torch.zeros(16 - input_ids.shape[0] % 16, dtype=torch.long, device=input_ids.device),
-                    ]
-                )
-                codes = input_ids_flatten.reshape(1, 16, -1)
+            codes, seq_token_counts = self._prepare_code2wav_codes(input_ids, seq_token_counts)
+            if codes.shape[-1] == 0:
+                batch_size = len(seq_token_counts) if seq_token_counts is not None else max(1, codes.shape[0])
+                return self._empty_code2wav_outputs(batch_size)
 
             # Generate audio from codec codes
             # Get every request's left_context_size from runtime_additional_information (passed via kwargs)
@@ -468,6 +441,13 @@ class Qwen3OmniMoeForConditionalGeneration(
                         left_context_size.append(meta["left_context_size"])
             else:
                 logger.debug("No additional_information provided to code2wav stage.")
+            if left_context_size and seq_token_counts is not None:
+                num_quantizers = self._code2wav_num_quantizers()
+                code_seq_lens = [count // num_quantizers for count in seq_token_counts]
+                left_context_size = [
+                    max(0, min(int(ctx), code_seq_lens[idx] if idx < len(code_seq_lens) else 0))
+                    for idx, ctx in enumerate(left_context_size)
+                ]
             audio_tensors = self.generate_audio(codes, left_context_size, seq_token_counts)
 
             return audio_tensors
@@ -553,6 +533,97 @@ class Qwen3OmniMoeForConditionalGeneration(
         return model_outputs
 
     # ==================== Audio Generation ====================
+
+    def _code2wav_num_quantizers(self) -> int:
+        return int(getattr(getattr(self.code2wav, "config", None), "num_quantizers", 16))
+
+    def _code2wav_codebook_size(self) -> int:
+        return int(getattr(getattr(self.code2wav, "config", None), "codebook_size", 2048))
+
+    def _empty_code2wav_outputs(self, batch_size: int) -> list[torch.Tensor]:
+        device = self._module_device(self.code2wav) if self.code2wav is not None else torch.device("cpu")
+        return [torch.empty((1, 0), dtype=torch.float32, device=device) for _ in range(max(1, batch_size))]
+
+    def _prepare_code2wav_codes(
+        self,
+        input_ids: torch.Tensor,
+        seq_token_counts: list[int] | None = None,
+    ) -> tuple[torch.Tensor, list[int] | None]:
+        """Build padded [B, Q, T] Code2Wav codes without letting invalid ids reach CUDA embedding."""
+        num_quantizers = self._code2wav_num_quantizers()
+        codebook_size = self._code2wav_codebook_size()
+        flat_ids = input_ids.reshape(-1)
+        is_cuda_capture = flat_ids.is_cuda and torch.cuda.is_current_stream_capturing()
+
+        if seq_token_counts is None:
+            seq_token_counts = [int(flat_ids.shape[0])]
+
+        if sum(int(count) for count in seq_token_counts) != int(flat_ids.shape[0]):
+            logger.warning(
+                "Code2Wav seq_token_counts=%s do not sum to input length %d; falling back to one flat request.",
+                seq_token_counts,
+                flat_ids.shape[0],
+            )
+            seq_token_counts = [int(flat_ids.shape[0])]
+
+        rows: list[torch.Tensor] = []
+        effective_counts: list[int] = []
+        offset = 0
+        dropped_tail = 0
+        dropped_invalid = 0
+        for raw_count in seq_token_counts:
+            count = int(raw_count)
+            segment = flat_ids[offset : offset + count]
+            offset += count
+
+            frame_count = int(segment.numel()) // num_quantizers
+            usable_count = frame_count * num_quantizers
+            if usable_count != int(segment.numel()):
+                dropped_tail += int(segment.numel()) - usable_count
+                segment = segment[:usable_count]
+            if usable_count == 0:
+                rows.append(torch.empty((num_quantizers, 0), dtype=flat_ids.dtype, device=flat_ids.device))
+                effective_counts.append(0)
+                continue
+
+            row = segment.reshape(num_quantizers, frame_count)
+            if is_cuda_capture:
+                # CUDA graph capture cannot include data-dependent CPU syncs
+                # or dynamic boolean indexing. Clamp is graph-safe and keeps
+                # dummy/captured execution from hitting embedding bounds.
+                row = row.clamp(0, codebook_size - 1)
+            else:
+                valid_frame_mask = (row >= 0).all(dim=0) & (row < codebook_size).all(dim=0)
+                invalid_frames = int((~valid_frame_mask).sum().item())
+                if invalid_frames:
+                    dropped_invalid += invalid_frames
+                    row = row[:, valid_frame_mask]
+            rows.append(row)
+            effective_counts.append(int(row.shape[-1]) * num_quantizers)
+
+        if dropped_tail:
+            logger.warning(
+                "Code2Wav dropped %d trailing codec token(s) that did not complete %d-quantizer frames.",
+                dropped_tail,
+                num_quantizers,
+            )
+        if dropped_invalid:
+            logger.warning(
+                "Code2Wav dropped %d codec frame(s) with ids outside [0, %d) before decoder embedding.",
+                dropped_invalid,
+                codebook_size,
+            )
+
+        max_frames = max((row.shape[-1] for row in rows), default=0)
+        codes = torch.zeros(
+            (len(rows), num_quantizers, max_frames),
+            dtype=flat_ids.dtype,
+            device=flat_ids.device,
+        )
+        for idx, row in enumerate(rows):
+            if row.shape[-1] > 0:
+                codes[idx, :, : row.shape[-1]] = row
+        return codes, effective_counts
 
     def generate_audio(
         self,

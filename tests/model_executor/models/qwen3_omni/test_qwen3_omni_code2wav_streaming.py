@@ -33,6 +33,9 @@ from types import SimpleNamespace
 import pytest
 import torch
 
+from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni import (
+    Qwen3OmniMoeForConditionalGeneration,
+)
 from vllm_omni.model_executor.models.qwen3_omni.qwen3_omni_code2wav import (
     Qwen3OmniMoeCode2Wav,
 )
@@ -92,6 +95,14 @@ def _make_codes(frames: int, q: int = _Q) -> torch.Tensor:
     """codes[0, :, i] == i so each frame carries its own absolute index."""
     idx = torch.arange(frames, dtype=torch.long)
     return idx.view(1, 1, frames).expand(1, q, frames).contiguous()
+
+
+def _make_omni_for_code2wav_prepare(*, q: int = 4, codebook_size: int = 8):
+    model = object.__new__(Qwen3OmniMoeForConditionalGeneration)
+    object.__setattr__(
+        model, "code2wav", SimpleNamespace(config=SimpleNamespace(num_quantizers=q, codebook_size=codebook_size))
+    )
+    return model
 
 
 def _decode_chunk(model, window, lc):
@@ -233,3 +244,40 @@ def test_batched_streaming_only_shifts_the_boundary_row():
     assert out[0].shape[-1] == batch_len - (lc * _UP - _TRIM)
     # Row 1 (shorter): code_seq_len*up < batch_len -> tail == 0 -> start = lc*up
     assert out[1].shape[-1] == short_frames * _UP - lc * _UP
+
+
+def test_prepare_code2wav_codes_filters_invalid_frames():
+    model = _make_omni_for_code2wav_prepare(q=4, codebook_size=8)
+    # Two frames: frame 0 is valid, frame 1 contains a special/out-of-codebook id.
+    flat = torch.tensor([1, 5, 2, 4198, 3, 6, 4, 7], dtype=torch.long)
+
+    codes, counts = Qwen3OmniMoeForConditionalGeneration._prepare_code2wav_codes(model, flat, [8])
+
+    assert counts == [4]
+    assert codes.shape == (1, 4, 1)
+    torch.testing.assert_close(codes[0, :, 0], torch.tensor([1, 2, 3, 4]))
+
+
+def test_prepare_code2wav_codes_trims_per_request_incomplete_tail():
+    model = _make_omni_for_code2wav_prepare(q=4, codebook_size=16)
+    # Request 0 has one complete frame plus one dangling token. Request 1 has two frames.
+    flat = torch.tensor([1, 2, 3, 4, 99, 5, 9, 6, 10, 7, 11, 8, 12], dtype=torch.long)
+
+    codes, counts = Qwen3OmniMoeForConditionalGeneration._prepare_code2wav_codes(model, flat, [5, 8])
+
+    assert counts == [4, 8]
+    assert codes.shape == (2, 4, 2)
+    torch.testing.assert_close(codes[0, :, 0], torch.tensor([1, 2, 3, 4]))
+    torch.testing.assert_close(codes[0, :, 1], torch.zeros(4, dtype=torch.long))
+    torch.testing.assert_close(codes[1, :, 0], torch.tensor([5, 6, 7, 8]))
+    torch.testing.assert_close(codes[1, :, 1], torch.tensor([9, 10, 11, 12]))
+
+
+def test_prepare_code2wav_codes_all_invalid_returns_empty_width():
+    model = _make_omni_for_code2wav_prepare(q=4, codebook_size=8)
+    flat = torch.tensor([4196, 4197, 4198, 4203], dtype=torch.long)
+
+    codes, counts = Qwen3OmniMoeForConditionalGeneration._prepare_code2wav_codes(model, flat, [4])
+
+    assert counts == [0]
+    assert codes.shape == (1, 4, 0)
