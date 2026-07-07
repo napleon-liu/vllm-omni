@@ -95,6 +95,17 @@ Send the standing instruction once (it persists for the session); subsequent tur
 just the frame. Ready-made headless client: `cli/run_cli_demo.py`. Reset a session with
 `POST /reset {"session_id": "..."}`.
 
+For a true full-duplex flow, connect to `/v1/realtime` over WebSocket. Send
+`input.append` events for text instructions and video/image frames; the server emits
+`response.created`, `response.delta`, and `response.done` while it keeps accepting more
+input on the same connection. New frame input can barge in and cancel stale output. A
+ready-made realtime client is available:
+
+```bash
+python examples/online_serving/joyvl_interaction/cli/run_realtime_demo.py \
+  path/to/video.mp4 --query "Alert me if a fire breaks out"
+```
+
 **What to ask it** — give a standing task and let it act on its own each second:
 
 - **Proactive alerting** — "tell me when someone enters", "alert me if a fire breaks out"
@@ -167,6 +178,10 @@ the model + orchestrator + WebUI together — point `WEBUI_DIR` at your clone.
 # headless: stream a clip and print the per-tick decision timeline
 # (the CLI reads video frames via OpenCV: `uv pip install opencv-python`)
 python examples/online_serving/joyvl_interaction/cli/run_cli_demo.py \
+  path/to/video.mp4 --query "Alert me if a fire breaks out"
+
+# full-duplex websocket: send frames and receive deltas on the same connection
+python examples/online_serving/joyvl_interaction/cli/run_realtime_demo.py \
   path/to/video.mp4 --query "Alert me if a fire breaks out"
 
 pytest tests/fullduplex   # framework + JoyVL unit tests

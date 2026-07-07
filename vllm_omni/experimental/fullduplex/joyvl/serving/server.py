@@ -12,9 +12,13 @@ from collections.abc import AsyncIterator
 from typing import Any
 
 import uvicorn
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from vllm_omni.experimental.fullduplex.core import protocol as ev
+from vllm_omni.experimental.fullduplex.core.adapter import DuplexAdapter, DuplexCapability, OutputChunk
+from vllm_omni.experimental.fullduplex.core.runtime import DuplexRuntime
+from vllm_omni.experimental.fullduplex.core.session import DuplexSession, DuplexSessionConfig
 from vllm_omni.experimental.fullduplex.joyvl.bridges.backend import OpenAIBackend
 from vllm_omni.experimental.fullduplex.joyvl.bridges.delegation import (
     DelegationBridge,
@@ -28,6 +32,72 @@ from vllm_omni.experimental.fullduplex.joyvl.decision.output_parser import to_to
 from vllm_omni.experimental.fullduplex.joyvl.memory.memory import Summarizer
 from vllm_omni.experimental.fullduplex.joyvl.serving.config import InteractionConfig
 from vllm_omni.experimental.fullduplex.joyvl.serving.session import InteractionSession, StepResult
+
+
+class JoyVLRealtimeAdapter(DuplexAdapter):
+    """Connect the JoyVL serving session to the shared full-duplex runtime."""
+
+    def __init__(self, manager: SessionManager, session_id: str) -> None:
+        self._manager = manager
+        self._session_id = session_id
+        self._pending_frames: list[str] = []
+        self._pending_query: str | None = None
+        self._lock = asyncio.Lock()
+
+    def capabilities(self) -> DuplexCapability:
+        return DuplexCapability(frozenset({"image", "video", "text"}), frozenset({"text"}), proactive=True)
+
+    async def on_input(self, session: DuplexSession, modality: str, data: Any) -> None:
+        async with self._lock:
+            if modality in ("image", "video"):
+                frame = self._coerce_frame(data)
+                if frame:
+                    self._pending_frames.append(frame)
+            elif modality == "text":
+                text = self._coerce_text(data)
+                if text:
+                    self._pending_query = text
+
+    def should_respond(self, session: DuplexSession) -> bool:
+        return bool(self._pending_frames)
+
+    async def respond(self, session: DuplexSession) -> AsyncIterator[OutputChunk]:
+        async with self._lock:
+            frames = self._pending_frames
+            query = self._pending_query
+            self._pending_frames = []
+            self._pending_query = None
+        if not frames:
+            return
+
+        result = await self._manager.step(self._session_id, frames, query)
+        if result.action.spoke and result.action.text:
+            yield OutputChunk("text", result.action.text)
+
+    @staticmethod
+    def _coerce_frame(data: Any) -> str | None:
+        if isinstance(data, str):
+            return data
+        if isinstance(data, dict):
+            image_url = data.get("image_url")
+            if isinstance(image_url, dict):
+                return image_url.get("url")
+            if isinstance(image_url, str):
+                return image_url
+            url = data.get("url")
+            if isinstance(url, str):
+                return url
+        return None
+
+    @staticmethod
+    def _coerce_text(data: Any) -> str | None:
+        if isinstance(data, str):
+            return data
+        if isinstance(data, dict):
+            text = data.get("text")
+            if isinstance(text, str):
+                return text
+        return None
 
 
 class SessionManager:
@@ -203,6 +273,15 @@ def _session_id(request: Request, payload: dict[str, Any]) -> str:
     )
 
 
+def _websocket_session_id(websocket: WebSocket) -> str:
+    return (
+        websocket.headers.get("x-streaming-session")
+        or websocket.headers.get("x-session-id")
+        or websocket.query_params.get("session_id")
+        or "default"
+    )
+
+
 def _completion_response(model: str, result: StepResult) -> dict[str, Any]:
     action = result.action
     memory = {"long_term_memory": result.long_term_memory, "mid_term_summaries": result.mid_term_summaries}
@@ -263,6 +342,41 @@ def create_app(config: InteractionConfig) -> FastAPI:
             return JSONResponse({"error": "interaction server requires at least one image_url frame"}, status_code=400)
         result = await manager.step(_session_id(request, payload), frames, query)
         return JSONResponse(_completion_response(config.main_model, result))
+
+    @app.websocket("/v1/realtime")
+    @app.websocket("/v1/realtime/joyvl")
+    async def realtime(websocket: WebSocket) -> None:
+        await websocket.accept()
+        session_id = _websocket_session_id(websocket)
+        adapter = JoyVLRealtimeAdapter(manager, session_id)
+        session = DuplexSession(
+            session_id,
+            DuplexSessionConfig(
+                input_modalities=("image", "video", "text"),
+                output_modalities=("text",),
+                proactive=True,
+            ),
+        )
+        runtime = DuplexRuntime(session, adapter)
+
+        async def receive_events() -> AsyncIterator[dict[str, Any]]:
+            while True:
+                try:
+                    event = await websocket.receive_json()
+                except WebSocketDisconnect:
+                    yield {"type": ev.CLOSE}
+                    return
+                yield event
+                if event.get("type") == ev.CLOSE:
+                    return
+
+        async def emit(event: dict[str, Any]) -> None:
+            await websocket.send_json(event)
+
+        try:
+            await runtime.run(receive_events(), emit)
+        except WebSocketDisconnect:
+            return
 
     @app.post("/reset")
     @app.post("/v1/streaming/reset")

@@ -24,13 +24,31 @@ vllm_omni/experimental/fullduplex/
 `core/` is the only part shared across models; data planes differ by model and are
 intentionally not shared.
 
-## Scope
+## Serving paths
 
-The runnable serving path is `joyvl/serving/` driving `decision/` + `memory/` directly.
-`joyvl/adapter.py` + `core/` are a **demonstration** of how a model plugs into the
-generic full-duplex framework (exercised by `tests/fullduplex/`), not the serving path
-the HTTP orchestrator currently uses — a fused-audio model (e.g. MiniCPM-o) is the case
-`core/` is built for.
+JoyVL has two serving paths:
+
+- `/v1/chat/completions` accepts one frame turn per request for OpenAI-compatible clients.
+- `/v1/realtime` (alias: `/v1/realtime/joyvl`) is a WebSocket endpoint backed by
+  `core.DuplexRuntime`. It accepts the event protocol below, keeps receiving input while
+  a response is in flight, and uses epoch barge-in so newer input cancels stale output.
+
+Example realtime events:
+
+```json
+{"type":"input.append","modality":"text","data":"Alert me if a fire breaks out"}
+{"type":"input.append","modality":"video","data":"data:image/jpeg;base64,..."}
+{"type":"response.cancel"}
+{"type":"close"}
+```
+
+Server output uses the same protocol:
+
+```json
+{"type":"response.created","response_index":1}
+{"type":"response.delta","response_index":1,"modality":"text","data":"Smoke is visible."}
+{"type":"response.done","response_index":1}
+```
 
 ## Adding a full-duplex model
 
