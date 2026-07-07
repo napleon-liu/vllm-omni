@@ -62,6 +62,25 @@ def _np_array_from_mp4_bytes(video_bytes: bytes) -> np.ndarray:
             pass
 
 
+def _mp4_bytes_have_decodable_audio(video_bytes: bytes) -> bool:
+    """Return True when MP4 bytes contain at least one decodable audio frame."""
+    try:
+        import av
+    except ImportError:
+        logger.warning("Synthetic video: PyAV is unavailable; cannot validate embedded audio.")
+        return False
+
+    try:
+        with av.open(io.BytesIO(video_bytes)) as container:
+            if not container.streams.audio:
+                return False
+            stream = container.streams.audio[0]
+            return next(container.decode(stream), None) is not None
+    except Exception as e:
+        logger.warning("Synthetic video: failed to validate embedded audio (%s).", e)
+        return False
+
+
 def generate_synthetic_audio(
     duration: int,
     num_channels: int,
@@ -290,8 +309,12 @@ def _mux_mp4_bytes_with_synthetic_audio(
         )
         audio_pcm = audio_result["np_array"]
     except Exception as e:
-        logger.warning("Synthetic video: generate_synthetic_audio failed (%s); using video-only MP4.", e)
-        return video_mp4_bytes
+        logger.warning("Synthetic video: generate_synthetic_audio failed (%s); using fallback tone audio.", e)
+        sample_count = int(sample_rate * duration_int)
+        timeline = np.arange(sample_count, dtype=np.float32) / float(sample_rate)
+        audio_pcm = (
+            0.20 * np.sin(2 * math.pi * 440.0 * timeline) + 0.08 * np.sin(2 * math.pi * 660.0 * timeline)
+        ).astype(np.float32)[:, None]
 
     try:
         import imageio_ffmpeg
@@ -330,17 +353,28 @@ def _mux_mp4_bytes_with_synthetic_audio(
                 "+faststart",
                 out_path,
             ]
-            subprocess.run(cmd, check=True, stdin=subprocess.DEVNULL, timeout=300)
+            subprocess.run(
+                cmd,
+                check=True,
+                stdin=subprocess.DEVNULL,
+                timeout=300,
+                capture_output=True,
+                text=True,
+            )
             with open(out_path, "rb") as f:
-                return f.read()
+                muxed_bytes = f.read()
+            if not _mp4_bytes_have_decodable_audio(muxed_bytes):
+                raise RuntimeError("muxed MP4 has no decodable audio stream")
+            return muxed_bytes
     except (
         FileNotFoundError,
         subprocess.CalledProcessError,
         subprocess.TimeoutExpired,
         OSError,
     ) as e:
-        logger.warning("Synthetic video: audio mux failed (%s); using video-only MP4.", e)
-        return video_mp4_bytes
+        stderr = getattr(e, "stderr", None)
+        detail = f"{e}; stderr={stderr}" if stderr else str(e)
+        raise RuntimeError(f"Synthetic video: audio mux failed ({detail}).") from e
 
 
 def generate_synthetic_video(
@@ -364,11 +398,14 @@ def generate_synthetic_video(
 
     if not force_regenerate and cache_path.is_file():
         video_bytes = cache_path.read_bytes()
-        return {
-            "np_array": _np_array_from_mp4_bytes(video_bytes),
-            "base64": base64.b64encode(video_bytes).decode("utf-8"),
-            "file_path": str(cache_path.resolve()),
-        }
+        if embed_audio and not _mp4_bytes_have_decodable_audio(video_bytes):
+            logger.warning("Synthetic video: cached embedded-audio MP4 lacks audio; regenerating %s.", cache_path)
+        else:
+            return {
+                "np_array": _np_array_from_mp4_bytes(video_bytes),
+                "base64": base64.b64encode(video_bytes).decode("utf-8"),
+                "file_path": str(cache_path.resolve()),
+            }
 
     import cv2
     import imageio
