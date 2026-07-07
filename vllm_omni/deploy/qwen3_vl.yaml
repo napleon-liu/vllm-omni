@@ -1,0 +1,19 @@
+# Qwen3-VL deploy: single-stage multimodal understanding.
+async_chunk: false
+dtype: bfloat16
+
+stages:
+  - stage_id: 0
+    max_num_seqs: 4
+    gpu_memory_utilization: 0.9
+    enforce_eager: false
+    async_scheduling: true
+    enable_prefix_caching: false
+    max_num_batched_tokens: 8192
+    devices: "0"
+    default_sampling_params:
+      temperature: 0.0
+      top_p: 1.0
+      top_k: -1
+      max_tokens: 1024
+      detokenize: true

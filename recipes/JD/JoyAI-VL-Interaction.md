@@ -9,15 +9,16 @@
 - Task: Per-tick proactive interaction over a live video stream — the model decides
   on its own each second to speak, stay silent, or delegate a hard question
 - Mode: Online serving — an OpenAI-compatible interaction orchestrator in front of
-  a plain `vllm serve` backend
+  a `vllm serve --omni` backend
 - Maintainer: Community
 
 ## When to use this recipe
 
 Use this to stand up the streaming-interaction serving layer (`vllm_omni/experimental/fullduplex/`).
-The model is served unchanged by `vllm serve`; this layer adds session state, 3-tier
-summary memory, the per-tick decision, and pluggable ASR / TTS / delegation. For the
-framework internals and how to add another full-duplex model, see
+The model is served unchanged by the Qwen3-VL stage in `vllm serve --omni`; this layer
+adds session state, 3-tier summary memory, the per-tick decision, and pluggable
+ASR / TTS / delegation. For the framework internals and how to add another
+full-duplex model, see
 [`vllm_omni/experimental/fullduplex/README.md`](../../vllm_omni/experimental/fullduplex/README.md).
 
 ## Environment
@@ -34,11 +35,11 @@ framework internals and how to add another full-duplex model, see
 From repository root:
 
 ```bash
-# 1. Serve the model (plain `vllm serve`, NOT --omni; it uses the Qwen3-VL architecture).
+# 1. Serve the model through vLLM-Omni's Qwen3-VL single-stage pipeline.
 #    The image limit must cover the short-term frame window (chunk_frames, default 100 = T_s);
 #    prefix caching keeps the accumulating window cheap. Lower both for smaller GPUs.
 vllm serve jdopensource/JoyAI-VL-Interaction-Preview \
-  --served-model-name JoyAI-VL-Interaction-Preview --port 8061 \
+  --omni --served-model-name JoyAI-VL-Interaction-Preview --port 8061 \
   --max-model-len 131072 --enable-prefix-caching \
   --limit-mm-per-prompt '{"image":256,"video":1}'
 
@@ -55,7 +56,7 @@ fp8 path, since the model is a standard Qwen3-VL VLM):
 
 ```bash
 vllm serve jdopensource/JoyAI-VL-Interaction-Preview \
-  --served-model-name JoyAI-VL-Interaction-Preview --port 8061 \
+  --omni --served-model-name JoyAI-VL-Interaction-Preview --port 8061 \
   --quantization fp8 --max-model-len 131072 --enable-prefix-caching \
   --limit-mm-per-prompt '{"image":256,"video":1}'
 ```
@@ -197,9 +198,9 @@ the audio-track caveat.
 
 ## Notes
 
-- `--omni` is **not** used: the model keeps the Qwen3-VL architecture (only the
-  weights are retrained), so stock `vllm serve` runs the forward pass; this recipe
-  only adds the interaction/serving layer.
+- `--omni` uses the single-stage Qwen3-VL pipeline. The model still keeps the
+  standard Qwen3-VL architecture; vLLM-Omni supplies the stage topology and deploy
+  defaults, while the interaction layer handles session state and proactive behavior.
 - On a host without `nvcc` / `ninja`, `vllm serve` of the 8B can crash engine-core in the
   FlashInfer sampler JIT (`FileNotFoundError: 'ninja'`) during `profile_run`. Set
   `VLLM_USE_FLASHINFER_SAMPLER=0` (or install `ninja`) to work around it.

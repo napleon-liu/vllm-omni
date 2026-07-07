@@ -521,6 +521,7 @@ class TestPipelineDiscovery:
         assert "qwen2_5_omni" in OMNI_PIPELINES
         assert "qwen3_omni_moe" in OMNI_PIPELINES
         assert "qwen3_tts" in OMNI_PIPELINES
+        assert "qwen3_vl" in OMNI_PIPELINES
 
     def test_registry_resolver_qwen3_omni_all_stages(self):
         """Test that providing the HF config for qwen3 omni with audio enabled uses all stages."""
@@ -1153,6 +1154,53 @@ class TestQwen2_5OmniPipeline:
         assert s.execution_type == StageExecutionType.LLM_GENERATION
         assert s.final_output_type == "audio"
         assert s.engine_output_type == "audio"
+
+
+class TestQwen3VLPipeline:
+    def test_registered(self):
+        p = StageConfigFactory.resolve_pipeline_config("qwen3_vl")
+        assert isinstance(p, PipelineConfig)
+        assert p.model_arch == "Qwen3VLForConditionalGeneration"
+        assert p.hf_architectures == ("Qwen3VLForConditionalGeneration",)
+        assert len(p.stages) == 1
+        assert p.validate() == []
+
+    def test_stage_shape(self):
+        p = StageConfigFactory.resolve_pipeline_config("qwen3_vl")
+        assert isinstance(p, PipelineConfig)
+
+        s = p.get_stage(0)
+        assert isinstance(s, StagePipelineConfig)
+        assert s.model_stage == "qwen3_vl"
+        assert s.execution_type == StageExecutionType.LLM_AR
+        assert s.final_output is True
+        assert s.final_output_type == "text"
+        assert s.owns_tokenizer is True
+        assert s.requires_multimodal_data is True
+        assert s.engine_output_type == "text"
+        assert s.model_arch == "Qwen3VLForConditionalGeneration"
+        assert s.sampling_constraints["detokenize"] is True
+
+    def test_create_from_joyai_qwen3_vl_config(self):
+        class JoyAIQwen3VLConfig(PretrainedConfig):
+            model_type = "qwen3_vl"
+
+            def __init__(self):
+                super().__init__(architectures=["Qwen3VLForConditionalGeneration"])
+
+        with patch("vllm_omni.config.config_factory.get_config", return_value=JoyAIQwen3VLConfig()):
+            stages = StageConfigFactory.create_from_model("JoyAI/JoyAI-VL-Interaction-Preview")
+
+        assert stages is not None
+        assert len(stages) == 1
+        stage = stages[0]
+        assert stage.stage_type == StageType.LLM
+        assert stage.worker_type == "ar"
+        assert stage.final_output is True
+        assert stage.final_output_type == "text"
+        assert stage.yaml_runtime["requires_multimodal_data"] is True
+        assert stage.yaml_engine_args["model_arch"] == "Qwen3VLForConditionalGeneration"
+        assert stage.yaml_engine_args["engine_output_type"] == "text"
 
 
 class TestQwen3TTSPipeline:
