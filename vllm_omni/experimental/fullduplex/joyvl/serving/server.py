@@ -358,6 +358,9 @@ def create_app(config: InteractionConfig) -> FastAPI:
             ),
         )
         runtime = DuplexRuntime(session, adapter)
+        await websocket.send_json(
+            ev.session_created(session_id, session.config.input_modalities, session.config.output_modalities)
+        )
 
         async def receive_events() -> AsyncIterator[dict[str, Any]]:
             while True:

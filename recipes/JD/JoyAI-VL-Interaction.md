@@ -106,6 +106,22 @@ python examples/online_serving/joyvl_interaction/cli/run_realtime_demo.py \
   path/to/video.mp4 --query "Alert me if a fire breaks out"
 ```
 
+For a reproducible audio/video demo, run the optional ASR/TTS bridge scripts and point
+the same realtime client at them. `--query-wav` sends a mono 16-bit PCM WAV to the ASR
+bridge as the standing instruction; `--tts-url` sends each `response.delta` to the TTS
+bridge and appends raw PCM bytes to `--tts-out`:
+
+```bash
+# optional terminals, if you want voice input/output in the demo
+bash examples/online_serving/joyvl_interaction/scripts/start_asr.sh
+bash examples/online_serving/joyvl_interaction/scripts/start_tts.sh
+
+python examples/online_serving/joyvl_interaction/cli/run_realtime_demo.py \
+  path/to/video.mp4 \
+  --asr-url ws://127.0.0.1:8093/v1/asr --query-wav path/to/query.wav \
+  --tts-url ws://127.0.0.1:8092/v1/tts --tts-out /tmp/joyvl-demo.pcm
+```
+
 **What to ask it** — give a standing task and let it act on its own each second:
 
 - **Proactive alerting** — "tell me when someone enters", "alert me if a fire breaks out"
@@ -183,6 +199,10 @@ python examples/online_serving/joyvl_interaction/cli/run_cli_demo.py \
 # full-duplex websocket: send frames and receive deltas on the same connection
 python examples/online_serving/joyvl_interaction/cli/run_realtime_demo.py \
   path/to/video.mp4 --query "Alert me if a fire breaks out"
+
+# websocket benchmark: multiple realtime sessions, JSON latency/throughput summary
+python examples/online_serving/joyvl_interaction/bench/bench_realtime.py \
+  --server http://127.0.0.1:8070 --sessions 4 --frames 20
 
 pytest tests/fullduplex   # framework + JoyVL unit tests
 ```

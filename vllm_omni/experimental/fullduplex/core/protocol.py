@@ -13,11 +13,25 @@ PLAYBACK_ACK = "playback.ack"
 CLOSE = "close"
 
 
+SESSION_CREATED = "session.created"
 RESPONSE_CREATED = "response.created"
 RESPONSE_DELTA = "response.delta"
 RESPONSE_DONE = "response.done"
 RESPONSE_CANCELLED = "response.cancelled"
 ERROR = "error"
+
+
+def session_created(
+    session_id: str,
+    input_modalities: tuple[str, ...] | list[str],
+    output_modalities: tuple[str, ...] | list[str],
+) -> dict[str, Any]:
+    return {
+        "type": SESSION_CREATED,
+        "session_id": session_id,
+        "input_modalities": list(input_modalities),
+        "output_modalities": list(output_modalities),
+    }
 
 
 def created(response_index: int) -> dict[str, Any]:

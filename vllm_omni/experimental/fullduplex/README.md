@@ -45,10 +45,16 @@ Example realtime events:
 Server output uses the same protocol:
 
 ```json
+{"type":"session.created","session_id":"demo","input_modalities":["image","video","text"],"output_modalities":["text"]}
 {"type":"response.created","response_index":1}
 {"type":"response.delta","response_index":1,"modality":"text","data":"Smoke is visible."}
 {"type":"response.done","response_index":1}
 ```
+
+Audio is pluggable rather than hard-wired into JoyVL: feed user speech through the ASR
+bridge to produce a text `input.append`, and send `response.delta` text through the TTS
+bridge for playback. `playback.ack` and `response.cancel` are part of the shared
+protocol; `response.cancel` immediately barge-ins and drops stale output.
 
 ## Adding a full-duplex model
 
