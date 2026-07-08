@@ -19,6 +19,7 @@ from PIL import Image
 from tests.helpers.media import (
     convert_audio_bytes_to_text,
     cosine_similarity_text,
+    preprocess_text,
 )
 
 _GENDER_PIPELINE = None
@@ -41,6 +42,23 @@ _PRESET_VOICE_GENDER_MAP: dict[str, str] = {
     "clone": "female",
     "ethan": "male",
 }
+
+
+def _short_transcript_contains_expected(transcript: str, expected: str) -> bool:
+    """Allow minor ASR repeats/noise for very short speech clips."""
+    transcript_clean = preprocess_text(transcript)
+    expected_clean = preprocess_text(expected)
+    if not transcript_clean or not expected_clean:
+        return False
+
+    transcript_words = transcript_clean.split()
+    expected_words = expected_clean.split()
+    if not transcript_words or not expected_words:
+        return False
+
+    short_text = min(len(transcript_clean), len(expected_clean)) <= 15
+    small_word_delta = len(transcript_words) <= len(expected_words) + 2
+    return short_text and small_word_delta and expected_clean in transcript_clean
 
 
 def assert_image_diffusion_response(
@@ -632,6 +650,10 @@ def _assert_transcript_matches(
     similarity = cosine_similarity_text(transcript.strip().lower(), expected)
     print(f"Cosine similarity: {similarity:.3f}")
     if similarity > threshold:
+        return
+
+    if _short_transcript_contains_expected(transcript, expected):
+        print("short speech containment check passed")
         return
 
     if escalation_model and audio_bytes:
