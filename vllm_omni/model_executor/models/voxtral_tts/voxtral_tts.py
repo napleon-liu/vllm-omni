@@ -209,11 +209,12 @@ class VoxtralTTSForConditionalGeneration(
 
     def tts_preprocess(self, input_ids: torch.Tensor, input_embeds: torch.Tensor, **info_dict: dict | None):
         self.post_process_idx = 0
-        audio_tokens = info_dict.pop("audio", None)
+        codes = info_dict.get("codes")
+        audio_tokens = codes.get("audio") if isinstance(codes, Mapping) else None
         if audio_tokens is None:
-            codes = info_dict.get("codes")
-            if isinstance(codes, Mapping):
-                audio_tokens = codes.get("audio")
+            # Backward compatible with request state written before #4527 moved
+            # Voxtral TTS feedback frames under ``codes.audio``.
+            audio_tokens = info_dict.pop("audio", None)
         if audio_tokens is not None:
             kwargs = {"audio_tokens": audio_tokens.to(input_ids.device)}
             multimodal_embeddings = self.model.embed_multimodal(**kwargs)

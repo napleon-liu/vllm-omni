@@ -26,13 +26,13 @@ _GENDER_PIPELINE = None
 _GENDER_PIPELINE_LOCK = threading.Lock()
 # Transcript gates default to whisper ``small`` for speed. ``small`` mishears a
 # short TTS clip ~0.5% of the time (e.g. "Hello"->"fellow", or hallucinating a
-# leading SFX token), which flakes the deterministic similarity gate. A test can
-# opt in to ASR escalation by setting ``transcript_escalation_model`` to a
-# whisper model name (e.g. ``"large-v3"``) in its request_config: on a failed
-# fast pass the clip is re-transcribed with that stronger ASR before the test
-# fails, so a weak-ASR mishear is rescued while a genuine model artifact still
-# fails (the strong ASR mismatches too). Tests that do not opt in keep the
-# strict behaviour.
+# leading SFX token), which flakes the deterministic similarity gate. Short
+# clips first get a conservative containment fallback for minor ASR repeats/noise.
+# A test can also opt in to ASR escalation by setting
+# ``transcript_escalation_model`` to a whisper model name (e.g. ``"large-v3"``)
+# in its request_config: on a failed fast pass the clip is re-transcribed with
+# that stronger ASR before the test fails, so a weak-ASR mishear is rescued while
+# a genuine model artifact still fails (the strong ASR mismatches too).
 _PCM_SPEECH_SAMPLE_RATE_HZ = 24_000
 _MIN_PCM_SPEECH_HNR_DB = 1.0
 _PRESET_VOICE_GENDER_MAP: dict[str, str] = {
@@ -638,13 +638,16 @@ def _assert_transcript_matches(
     ``transcript`` is the fast whisper-``small`` result. If it clears
     ``threshold`` the check passes immediately.
 
+    If the cosine check fails, very short clips get a conservative containment
+    fallback that accepts minor ASR repeats/noise only when the expected text is
+    still present and the transcript has few extra words.
+
     When ``escalation_model`` is set (opt-in via the ``transcript_escalation_model``
-    request_config key) and the fast check fails, the clip is re-transcribed with
-    that stronger ASR and the assertion is decided on its verdict -- so a weak
-    whisper-``small`` mishear on a short clip does not flake the gate, while a
-    genuine model artifact still fails (the strong ASR mismatches too). When
-    ``escalation_model`` is ``None`` the original strict behaviour is preserved,
-    so other tests are unaffected.
+    request_config key) and the fast check plus containment fallback fail, the
+    clip is re-transcribed with that stronger ASR and the assertion is decided on
+    its verdict -- so a weak whisper-``small`` mishear on a short clip does not
+    flake the gate, while a genuine model artifact still fails (the strong ASR
+    mismatches too).
     """
     expected = str(expected_text).strip().lower()
     similarity = cosine_similarity_text(transcript.strip().lower(), expected)
